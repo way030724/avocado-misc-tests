@@ -1,6 +1,7 @@
 config:
-    namespace_cnt: 4
     region: 'region0'
+    size:
+    map:
     preserve_change: True
     mnt_point: '/mnt/pmem'
     fio_job:
@@ -12,7 +13,5 @@ config:
     mode_types: !mux
         fsdax:
             modes: 'fsdax'
-            size: '1G'
         sector:
             modes: 'sector'
-            size: '300M'

@@ -55,9 +55,9 @@ class Dwh(Test):
 
         dist = distro.detect()
         packages = ['gcc', 'patch']
-        if dist.name == 'Ubuntu':
+        if dist.name in ['Ubuntu', 'debian']:
             packages.extend(['g++'])
-        elif dist.name in ['SuSE', 'fedora', 'rhel']:
+        elif dist.name in ['SuSE', 'fedora', 'rhel', 'centos']:
             packages.extend(['gcc-c++'])
         for package in packages:
             if not smm.check_installed(package) and not smm.install(package):
@@ -69,6 +69,8 @@ class Dwh(Test):
         if dist.name in ['fedora', 'rhel']:
             process.system('patch -p0 < %s' %
                            self.get_data('fofd.patch'), shell=True)
+        elif dist.name in ['Ubuntu', 'debian']:
+            process.system("sed -i 's/g++.*/& -lrt/' Makefile", shell=True)
         build.make(self.teststmpdir)
 
     def test(self):

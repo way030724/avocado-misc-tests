@@ -50,22 +50,31 @@ class FioTest(Test):
         """
         Build 'fio'.
         """
-        default_url = "http://brick.kernel.dk/snaps/fio-2.1.10.tar.gz"
+        default_url = "https://brick.kernel.dk/snaps/fio-git-latest.tar.gz"
         url = self.params.get('fio_tool_url', default=default_url)
         self.disk = self.params.get('disk', default=None)
         self.dirs = self.params.get('dir', default=self.workdir)
         fstype = self.params.get('fs', default='ext4')
         tarball = self.fetch_asset(url)
         archive.extract(tarball, self.teststmpdir)
-        fio_version = os.path.basename(tarball.split('.tar.')[0])
-        self.sourcedir = os.path.join(self.teststmpdir, fio_version)
+        self.sourcedir = os.path.join(self.teststmpdir, "fio")
         build.make(self.sourcedir)
 
-        pkg_list = ['libaio', 'libaio-devel']
         smm = SoftwareManager()
         if fstype == 'btrfs':
-            if distro.detect().name == 'Ubuntu':
-                pkg_list.append('btrfs-tools')
+            ver = int(distro.detect().version)
+            rel = int(distro.detect().release)
+            if distro.detect().name == 'rhel':
+                if (ver == 7 and rel >= 4) or ver > 7:
+                    self.cancel("btrfs is not supported with \
+                                RHEL 7.4 onwards")
+
+        if distro.detect().name in ['Ubuntu', 'debian']:
+            pkg_list = ['libaio-dev']
+            if fstype == 'btrfs':
+                pkg_list.append('btrfs-progs')
+        else:
+            pkg_list = ['libaio', 'libaio-devel']
 
         for pkg in pkg_list:
             if pkg and not smm.check_installed(pkg) and not smm.install(pkg):

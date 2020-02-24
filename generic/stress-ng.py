@@ -63,10 +63,10 @@ class Stressng(Test):
         self.parallel = self.params.get('parallel', default=True)
 
         deps = ['gcc', 'make']
-        if 'Ubuntu' in detected_distro.name:
+        if detected_distro.name in ['Ubuntu', 'debian']:
             deps.extend([
                 'libaio-dev', 'libapparmor-dev', 'libattr1-dev', 'libbsd-dev',
-                'libcap-dev', 'libgcrypt11-dev', 'libkeyutils-dev',
+                'libcap-dev', 'libgcrypt20-dev', 'libkeyutils-dev',
                 'libsctp-dev', 'zlib1g-dev'])
         else:
             deps.extend(['libattr-devel', 'libcap-devel',

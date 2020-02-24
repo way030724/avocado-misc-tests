@@ -81,12 +81,12 @@ class NetworkVirtualization(Test):
             self.cancel("HMC IP not got")
         self.hmc_pwd = self.params.get("hmc_pwd", '*', default=None)
         self.hmc_username = self.params.get("hmc_username", '*', default=None)
-        self.lpar = self.get_mcp_component("NodeNameList").split('.')[0]
+        self.lpar = self.get_partition_name("Partition Name")
         if not self.lpar:
-            self.cancel("LPAR Name not got from lsrsrc command")
-        self.login(self.hmc_ip, self.hmc_username, self.hmc_pwd)
+            self.cancel("LPAR Name not got from lparstat command")
+        self.con_hmc = self.login(self.hmc_ip, self.hmc_username, self.hmc_pwd)
         cmd = 'lssyscfg -r sys  -F name'
-        output = self.run_command(cmd)
+        output = self.run_command(self.con_hmc, cmd)
         self.server = ''
         for line in output:
             if line in self.lpar:
@@ -95,14 +95,16 @@ class NetworkVirtualization(Test):
         if not self.server:
             self.cancel("Managed System not got")
         cmd = 'lssyscfg -r lpar -F name -m %s' % self.server
-        output = self.run_command(cmd)
+        output = self.run_command(self.con_hmc, cmd)
         for line in output:
             if "%s-" % self.lpar in line:
                 self.lpar = line
                 break
         self.slot_num = self.params.get("slot_num", '*', default=None)
-        if int(self.slot_num) < 3 or int(self.slot_num) > 2999:
-            self.cancel("Slot invalid. Valid range: 3 - 2999")
+        self.slot_num = self.slot_num.split(',')
+        for slot in self.slot_num:
+            if int(slot) < 3 or int(slot) > 2999:
+                self.cancel("Slot invalid. Valid range: 3 - 2999")
         self.vios_name = self.params.get("vios_names", '*',
                                          default=None).split(',')
         self.sriov_port = self.params.get("sriov_ports", '*',
@@ -127,34 +129,43 @@ class NetworkVirtualization(Test):
             "auto_failover", '*', default=None)
         if self.auto_failover not in ['0', '1']:
             self.auto_failover = '1'
+        self.vios_ip = self.params.get('vios_ip', '*', default=None)
+        self.vios_user = self.params.get('vios_username', '*', default=None)
+        self.vios_pwd = self.params.get('vios_pwd', '*', default=None)
+        self.con_vios = self.login(self.vios_ip, self.vios_user, self.vios_pwd)
         self.count = int(self.params.get('vnic_test_count', default="1"))
         self.num_of_dlpar = int(self.params.get("num_of_dlpar", default='1'))
-        self.device_ip = self.params.get('device_ip', '*', default=None)
-        self.mac_id = self.params.get('mac_id', default="02:03:03:03:03:01")
-        self.mac_id = self.mac_id.replace(':', '')
-        self.netmask = self.params.get('netmask', '*', default=None)
-        self.peer_ip = self.params.get('peer_ip', default=None)
-        self.login(self.hmc_ip, self.hmc_username, self.hmc_pwd)
-        self.run_command("uname -a")
+        self.device_ip = self.params.get('device_ip', '*',
+                                         default=None).split(',')
+        self.mac_id = self.params.get('mac_id',
+                                      default="02:03:03:03:03:01").split(',')
+        self.mac_id = [mac.replace(':', '') for mac in self.mac_id]
+        self.netmask = self.params.get('netmask', '*', default=None).split(',')
+        self.peer_ip = self.params.get('peer_ip', default=None).split(',')
+        self.run_command(self.con_hmc, "uname -a")
         cmd = 'lssyscfg -m ' + self.server + \
               ' -r lpar --filter lpar_names=' + self.lpar + \
               ' -F lpar_id'
-        self.lpar_id = self.run_command(cmd)[-1]
+        self.lpar_id = self.run_command(self.con_hmc, cmd)[-1]
         self.vios_id = []
         for vios_name in self.vios_name:
             cmd = 'lssyscfg -m ' + self.server + \
                   ' -r lpar --filter lpar_names=' + vios_name + \
                   ' -F lpar_id'
-            self.vios_id.append(self.run_command(cmd)[-1])
+            self.vios_id.append(self.run_command(self.con_hmc, cmd)[-1])
         cmd = 'lshwres -m %s -r sriov --rsubtype adapter -F \
               phys_loc:adapter_id' % self.server
-        adapter_id_output = self.run_command(cmd)
+        adapter_id_output = self.run_command(self.con_hmc, cmd)
         self.backing_adapter_id = []
         for backing_adapter in self.backing_adapter:
             for line in adapter_id_output:
                 if str(backing_adapter) in line:
                     self.backing_adapter_id.append(line.split(':')[1])
         self.rsct_service_start()
+        if len(self.slot_num) > 1:
+            if 'backing' in str(self.name.name) or \
+               'failover' in str(self.name.name):
+                self.cancel("this test is not needed")
 
     @staticmethod
     def get_mcp_component(component):
@@ -163,16 +174,31 @@ class NetworkVirtualization(Test):
         '''
         for line in process.system_output('lsrsrc IBM.MCP %s' % component,
                                           ignore_status=True, shell=True,
-                                          sudo=True).splitlines():
+                                          sudo=True).decode("utf-8") \
+                                                    .splitlines():
             if component in line:
                 return line.split()[-1].strip('{}\"')
+        return ''
+
+    @staticmethod
+    def get_partition_name(component):
+        '''
+        get partition name from lparstat -i
+        '''
+
+        for line in process.system_output('lparstat -i', ignore_status=True,
+                                          shell=True,
+                                          sudo=True).decode("utf-8") \
+                                                    .splitlines():
+            if component in line:
+                return line.split(':')[-1].strip()
         return ''
 
     def login(self, ipaddr, username, password):
         '''
         SSH Login method for remote server
         '''
-        pxh = pxssh.pxssh()
+        pxh = pxssh.pxssh(encoding='utf-8')
         # Work-around for old pxssh not having options= parameter
         pxh.SSH_OPTS = pxh.SSH_OPTS + " -o 'StrictHostKeyChecking=no'"
         pxh.SSH_OPTS = pxh.SSH_OPTS + " -o 'UserKnownHostsFile /dev/null' "
@@ -187,33 +213,33 @@ class NetworkVirtualization(Test):
         pxh.set_unique_prompt()
         pxh.prompt(timeout=60)
         self.pxssh = pxh
+        return pxh
 
-    def run_command(self, command, timeout=300):
+    def run_command(self, console, command, timeout=300):
         '''
         SSH Run command method for running commands on remote server
         '''
         self.log.info("Running the command on hmc %s", command)
-        con = self.pxssh
-        con.sendline(command)
-        con.expect("\n")  # from us
-        con.expect(con.PROMPT, timeout=timeout)
-        output = con.before.splitlines()
-        con.sendline("echo $?")
-        con.prompt(timeout)
+        console.sendline(command)
+        console.expect("\n")  # from us
+        console.expect(console.PROMPT, timeout=timeout)
+        output = console.before.splitlines()
+        console.sendline("echo $?")
+        console.prompt(timeout)
         return output
 
-    def check_slot_availability(self):
+    def check_slot_availability(self, slot_num):
         '''
         Checks if given slot is available(free) to be used.
         :return: True if slot available, False otherwise.
         '''
         cmd = 'lshwres -r virtualio -m %s --rsubtype vnic --filter \
            "lpar_names=%s" -F slot_num' % (self.server, self.lpar)
-        for slot in self.run_command(cmd):
+        for slot in self.run_command(self.con_hmc, cmd):
             if 'No results were found' in slot:
                 return True
-            if int(self.slot_num) == int(slot):
-                self.log.debug("Slot already exists")
+            if int(slot_num) == int(slot):
+                self.log.debug("Slot %s already exists" % slot_num)
                 return False
         return True
 
@@ -231,7 +257,7 @@ class NetworkVirtualization(Test):
 
         output = process.system_output("lssrc -a", ignore_status=True,
                                        shell=True, sudo=True)
-        if "inoperative" in output:
+        if "inoperative" in output.decode("utf-8"):
             self.cancel("Failed to start the rsct and rsct_rm services")
 
     def install_packages(self):
@@ -262,21 +288,31 @@ class NetworkVirtualization(Test):
         '''
         Network virtualized device add operation
         '''
-        if not self.check_slot_availability():
-            self.fail("Slot already exists")
-        self.device_add_remove('add')
-        output = self.list_device()
-        if 'slot_num=%s' % self.slot_num not in str(output):
-            self.log.debug(output)
-            self.fail("lshwres fails to list Network virtualized device \
-                       after add operation")
+        for slot, mac, device_ip, netmask in zip(self.slot_num, self.mac_id,
+                                                 self.device_ip, self.netmask):
+            if not self.check_slot_availability(slot):
+                self.fail("Slot does not exist")
+            self.device_add_remove(slot, mac, 'add')
+            self.interface_naming(mac, slot)
+            output = self.list_device(slot)
+            if 'slot_num=%s' % slot not in str(output):
+                self.log.debug(output)
+                self.fail("lshwres fails to list Network virtualized device \
+                           after add operation")
+            if mac not in str(output):
+                self.log.debug(output)
+                self.fail("MAC address in HMC differs")
+            if not self.find_device(mac):
+                self.fail("MAC address differs in linux")
+            self.configure_device(device_ip, netmask, mac)
 
     def test_backingdevadd(self):
         '''
         Adding Backing device for Network virtualized device
         '''
-        if self.check_slot_availability():
-            self.fail("Slot does not exist")
+        for slot in self.slot_num:
+            if self.check_slot_availability(slot):
+                self.fail("Slot does not exist")
         pre_add = self.backing_dev_count()
         for count in range(1, self.backingdev_count):
             self.backing_dev_add_remove('add', count)
@@ -293,51 +329,57 @@ class NetworkVirtualization(Test):
         Triggers Failover for the Network virtualized
         device
         '''
-        original = self.get_active_device_logport()
+        original = self.get_active_device_logport(self.slot_num[0])
         for _ in range(self.count):
-            before = self.get_active_device_logport()
-            self.trigger_failover(self.get_backing_device_logport())
+            before = self.get_active_device_logport(self.slot_num[0])
+            self.trigger_failover(self.get_backing_device_logport
+                                  (self.slot_num[0]))
             time.sleep(10)
-            after = self.get_active_device_logport()
+            after = self.get_active_device_logport(self.slot_num[0])
             self.log.debug("Active backing device: %s", after)
             if before == after:
                 self.fail("No failover happened")
-            if not self.ping_check():
+            if not self.ping_check(self.device_ip[0], self.netmask[0],
+                                   self.mac_id[0], self.peer_ip[0]):
                 self.fail("Failover has affected Network connectivity")
-        if original != self.get_active_device_logport():
+        if original != self.get_active_device_logport(self.slot_num[0]):
             self.trigger_failover(original)
-        if original != self.get_active_device_logport():
+        if original != self.get_active_device_logport(self.slot_num[0]):
             self.log.warn("Fail: Activating Initial backing dev %s" % original)
 
     def test_unbindbind(self):
         """
         Performs driver unbind and bind for the Network virtualized device
         """
-        device_id = self.find_device_id()
-        try:
-            for _ in range(self.count):
-                for operation in ["unbind", "bind"]:
-                    self.log.info("Running %s operation for Network \
-                                   virtualized device", operation)
-                    genio.write_file(os.path.join
-                                     ("/sys/bus/vio/drivers/ibmvnic",
-                                      operation), "%s" % device_id)
-                    time.sleep(10)
-                self.log.info("Running a ping test to check if unbind/bind \
-                                    affected newtwork connectivity")
-                if not self.ping_check():
-                    self.fail("Ping test failed. Network virtualized \
-                           unbind/bind has affected Network connectivity")
-        except CmdError as details:
-            self.log.debug(str(details))
-            self.fail("Driver %s operation failed" % operation)
+        for device_ip, netmask, mac, peer_ip in zip(self.device_ip,
+                                                    self.netmask,
+                                                    self.mac_id, self.peer_ip):
+            device_id = self.find_device_id(mac)
+            try:
+                for _ in range(self.count):
+                    for operation in ["unbind", "bind"]:
+                        self.log.info("Running %s operation for Network \
+                                       virtualized device", operation)
+                        genio.write_file(os.path.join
+                                         ("/sys/bus/vio/drivers/ibmvnic",
+                                          operation), "%s" % device_id)
+                        time.sleep(10)
+                    self.log.info("Running a ping test to check if unbind/bind \
+                                        affected newtwork connectivity")
+                    if not self.ping_check(device_ip, netmask, mac, peer_ip):
+                        self.fail("Ping test failed. Network virtualized"
+                                  "unbind/bind has affected"
+                                  "Network connectivity")
+            except CmdError as details:
+                self.log.debug(str(details))
+                self.fail("Driver %s operation failed" % operation)
 
     def test_clientfailover(self):
         '''
         Performs Client initiated failover for Network virtualized
         device
         '''
-        device_id = self.find_device_id()
+        device_id = self.find_device_id(self.mac_id[0])
         try:
             for _ in range(self.count):
                 for val in range(int(self.backing_dev_count())):
@@ -348,7 +390,8 @@ class NetworkVirtualization(Test):
                     time.sleep(10)
                     self.log.info("Running a ping test to check if failover \
                                     affected Network connectivity")
-                    if not self.ping_check():
+                    if not self.ping_check(self.device_ip[0], self.netmask[0],
+                                           self.mac_id[0], self.peer_ip[0]):
                         self.fail("Ping test failed. Network virtualized \
                                    failover has affected Network connectivity")
         except CmdError as details:
@@ -362,76 +405,134 @@ class NetworkVirtualization(Test):
         '''
         if len(self.backing_adapter) >= 2:
             for _ in range(self.count):
-                self.update_backing_devices()
-                backing_logport = self.get_backing_device_logport()
-                active_logport = self.get_active_device_logport()
+                self.update_backing_devices(self.slot_num[0])
+                backing_logport = self.get_backing_device_logport(self.slot_num[0])
+                active_logport = self.get_active_device_logport(self.slot_num[0])
                 if self.enable_auto_failover():
                     if not self.change_failover_priority(backing_logport, '1'):
                         self.fail("Fail to change the priority for backing device %s", backing_logport)
                     if not self.change_failover_priority(active_logport, '100'):
                         self.fail("Fail to change the priority for active device %s", active_logport)
-                    if backing_logport != self.get_active_device_logport():
+                    if backing_logport != self.get_active_device_logport(self.slot_num[0]):
                         self.fail("Auto failover of backing device failed")
-                    if not self.ping_check():
+                    if not self.ping_check(self.device_ip[0], self.netmask[0],
+                                           self.mac_id[0], self.peer_ip[0]):
                         self.fail("Auto failover has effected connectivity")
                 else:
                     self.fail("Could not enable auto failover")
         else:
             self.cancel("Provide more backing device, only 1 given")
 
+    def test_rmdev_viosfailover(self):
+        '''
+        using mrdev and mkdev command to check vios failover works
+        '''
+        cmd = "lsmap -all -vnic -cpid %s" % self.lpar_id
+        vnic_server = self.run_command(self.con_vios, cmd)[2].split()[0]
+
+        cmd = "lsmap -vnic -vadapter %s" % vnic_server
+        output = self.run_command(self.con_vios, cmd)
+
+        vnic_backing_device = None
+        for line in output:
+            if 'Backing device' in line:
+                vnic_backing_device = line.split(':')[-1]
+
+        before = self.get_active_device_logport(self.slot_num[0])
+        self.log.debug("Active backing device before : %s", before)
+
+        self.validate_vios_command('rmdev -l %s' % vnic_server, 'Defined')
+        if vnic_backing_device:
+            self.validate_vios_command('rmdev -l %s' % vnic_backing_device, 'Defined')
+
+        after = self.get_active_device_logport(self.slot_num[0])
+        self.log.debug("Active backing device after: %s", after)
+
+        if before == after:
+            self.fail("failover not occour")
+        time.sleep(20)
+
+        if vnic_backing_device:
+            self.validate_vios_command('mkdev -l %s' % vnic_backing_device, 'Available')
+        self.validate_vios_command('mkdev -l %s' % vnic_server, 'Available')
+
+        if not self.ping_check(self.device_ip[0], self.netmask[0],
+                               self.mac_id[0], self.peer_ip[0]):
+            self.fail("Ping test failed. Network virtualized \
+                      vios failover has affected Network connectivity")
+
     def test_vnic_dlpar(self):
         '''
         Perform vNIC device hot add and hot remove using drmgr command
         '''
-        self.update_backing_devices()
-        dev_id = self.find_device_id()
-        slot = self.find_virtual_slot(dev_id)
-        if slot:
-            try:
-                for _ in range(self.num_of_dlpar):
-                    self.drmgr_vnic_dlpar('-r', slot)
-                    self.drmgr_vnic_dlpar('-a', slot)
-            except CmdError as details:
-                self.log.debug(str(details))
-                self.fail("dlpar operation did not complete")
-            if not self.ping_check():
-                self.fail("dlpar has affected Network connectivity")
-        else:
-            self.fail("slot not found")
+        for slot_no, device_ip, netmask, mac, peer_ip in zip(self.slot_num,
+                                                             self.device_ip,
+                                                             self.netmask,
+                                                             self.mac_id,
+                                                             self.peer_ip):
+            self.update_backing_devices(slot_no)
+            dev_id = self.find_device_id(mac)
+            device_name = self.find_device(mac)
+            slot = self.find_virtual_slot(dev_id)
+            if slot:
+                try:
+                    for _ in range(self.num_of_dlpar):
+                        self.drmgr_vnic_dlpar('-r', slot)
+                        self.drmgr_vnic_dlpar('-a', slot)
+                        self.wait_intrerface(device_name)
+                except CmdError as details:
+                    self.log.debug(str(details))
+                    self.fail("dlpar operation did not complete")
+                if not self.ping_check(device_ip, netmask, mac, peer_ip):
+                    self.fail("dlpar has affected Network connectivity")
+            else:
+                self.fail("slot not found")
 
     def test_backingdevremove(self):
         '''
         Removing Backing device for Network virtualized device
         '''
-        if self.check_slot_availability():
-            self.fail("Slot does not exist")
-        self.update_backing_devices()
-        pre_remove = self.backing_dev_count()
-        for count in range(1, self.backingdev_count):
-            self.backing_dev_add_remove('remove', count)
-        post_remove = self.backing_dev_count()
-        post_remove_count = pre_remove - post_remove + 1
-        if post_remove_count != self.backingdev_count:
-            self.log.debug("Actual backing dev count: %d", post_remove_count)
-            self.log.debug("Expected backing dev count: %d",
-                           self.backingdev_count)
-            self.fail("Failed to remove backing device")
+        for slot in self.slot_num:
+            if self.check_slot_availability(slot):
+                self.fail("Slot does not exist")
+            self.update_backing_devices(slot)
+            pre_remove = self.backing_dev_count()
+            for count in range(1, self.backingdev_count):
+                self.backing_dev_add_remove('remove', count)
+            post_remove = self.backing_dev_count()
+            post_remove_count = pre_remove - post_remove + 1
+            if post_remove_count != self.backingdev_count:
+                self.log.debug("Actual backing dev count: %d",
+                               post_remove_count)
+                self.log.debug("Expected backing dev count: %d",
+                               self.backingdev_count)
+                self.fail("Failed to remove backing device")
 
     def test_remove(self):
         '''
         Network virtualized device remove operation
         '''
-        if self.check_slot_availability():
-            self.fail("Slot does not exist")
-        self.update_backing_devices()
-        self.device_add_remove('remove')
-        output = self.list_device()
-        if 'slot_num=%s' % self.slot_num in str(output):
-            self.log.debug(output)
-            self.fail("lshwres still lists the Network virtualized device \
-                       after remove operation")
+        for slot in self.slot_num:
+            if self.check_slot_availability(slot):
+                self.fail("Slot does not exist")
+            self.update_backing_devices(slot)
+            self.device_add_remove(slot, '', 'remove')
+            output = self.list_device(slot)
+            if 'slot_num=%s' % slot in str(output):
+                self.log.debug(output)
+                self.fail("lshwres still lists the Network virtualized device \
+                           after remove operation")
 
-    def device_add_remove(self, operation):
+    def validate_vios_command(self, cmd, validate_string):
+        '''
+        checking for vnicserver and backing device
+        '''
+        l_cmd = "echo \"%s\" | oem_setup_env" % cmd
+        output = self.run_command(self.con_vios, l_cmd)
+        if validate_string not in str(output):
+            self.fail("command fail in vios")
+
+    def device_add_remove(self, slot, mac, operation):
         '''
         Adds and removes a Network virtualized device based
         on the operation
@@ -443,28 +544,28 @@ class NetworkVirtualization(Test):
         if operation == 'add':
             cmd = 'chhwres -m %s --id %s -r virtualio --rsubtype vnic \
                    -o a -s %s -a \"auto_priority_failover=%s,mac_addr=%s,%s\" '\
-                   % (self.server, self.lpar_id, self.slot_num,
-                      self.auto_failover, self.mac_id, backing_device)
+                   % (self.server, self.lpar_id, slot,
+                      self.auto_failover, mac, backing_device)
         else:
             cmd = 'chhwres -m %s --id %s -r virtualio --rsubtype vnic \
                    -o r -s %s'\
-                   % (self.server, self.lpar_id, self.slot_num)
+                   % (self.server, self.lpar_id, slot)
         try:
-            self.run_command(cmd)
+            self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("Network virtualization %s device operation \
                        failed" % operation)
 
-    def list_device(self):
+    def list_device(self, slot):
         '''
         Lists the Network vritualized devices
         '''
         cmd = 'lshwres -r virtualio -m %s --rsubtype vnic --filter \
               \"lpar_names=%s,slots=%s\"' % (self.server, self.lpar,
-                                             self.slot_num)
+                                             slot)
         try:
-            output = self.run_command(cmd)
+            output = self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("lshwres operation failed ")
@@ -483,18 +584,18 @@ class NetworkVirtualization(Test):
         if operation == 'add':
             cmd = 'chhwres -r virtualio --rsubtype vnic -o s -m %s -s %s \
                    --id %s -a \"auto_priority_failover=%s,backing_devices+=%s\"' % (self.server,
-                                                                                    self.slot_num,
+                                                                                    self.slot_num[0],
                                                                                     self.lpar_id,
                                                                                     self.auto_failover,
                                                                                     add_backing_device)
         else:
             cmd = 'chhwres -r virtualio --rsubtype vnic -o s -m %s -s %s \
                    --id %s -a backing_devices-=%s' % (self.server,
-                                                      self.slot_num,
+                                                      self.slot_num[0],
                                                       self.lpar_id,
                                                       add_backing_device)
         try:
-            self.run_command(cmd)
+            self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("Network virtualization Backing device %s \
@@ -509,7 +610,7 @@ class NetworkVirtualization(Test):
                --filter lpar_names=%s -F slot_num,backing_device_states' \
                % (self.server, self.lpar)
         try:
-            output = self.run_command(cmd)
+            output = self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("lshwres operation failed ")
@@ -524,22 +625,25 @@ class NetworkVirtualization(Test):
                --filter lpar_names=%s -F backing_devices' \
                % (self.server, self.lpar)
         try:
-            output = self.run_command(cmd)
+            output = self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("lshwres operation failed ")
         return output
 
-    def update_backing_devices(self):
+    def update_backing_devices(self, slot):
         '''
         Updates the lists of backing devices, ports, vioses.
         Makes sure the active device's details are on index 0.
         '''
-        logport = self.get_active_device_logport()
+        logport = self.get_active_device_logport(slot)
+        adapter_id = ''
         for entry in self.get_backing_devices()[-1].split(','):
             if logport in entry:
                 adapter_id = entry.split('/')[3]
                 port = entry.split('/')[4]
+        if not adapter_id:
+            return
         for i in range(0, len(self.backing_adapter_id)):
             if adapter_id == self.backing_adapter_id[i]:
                 if port == self.sriov_port[i]:
@@ -555,25 +659,30 @@ class NetworkVirtualization(Test):
         '''
         Lists the count of backing devices
         '''
-        output = self.backing_dev_list()
-        for i in output:
-            if i.startswith('%s,' % self.slot_num):
-                count = len(i.split(',')[1:])
-        return count
+        for slot in self.slot_num:
+            output = self.backing_dev_list()
+            for i in output:
+                if i.startswith('%s,' % slot):
+                    count = len(i.split(',')[1:])
+            return count
 
     @staticmethod
-    def find_device():
+    def find_device(mac_addrs):
         """
         Finds out the latest added network virtualized device
         """
-        device = netifaces.interfaces()[-1]
-        return device
+        mac = ':'.join(mac_addrs[i:i+2] for i in range(0, 12, 2))
+        devices = netifaces.interfaces()
+        for device in devices:
+            if mac in netifaces.ifaddresses(device)[17][0]['addr']:
+                return device
+        return ''
 
-    def interfacewait(self):
+    def interfacewait(self, mac):
         """
         Waits for the interface link to be UP
         """
-        device = self.find_device()
+        device = self.find_device(mac)
         for _ in range(0, 600, 5):
             if 'UP' or 'yes' in \
                     process.system_output("ip link show %s | head -1"
@@ -599,9 +708,9 @@ class NetworkVirtualization(Test):
         """
         cmd = 'lshwres -r virtualio -m %s --rsubtype vnic \
                --filter lpar_names=%s,slots=%s' \
-               % (self.server, self.lpar, self.slot_num)
+               % (self.server, self.lpar, self.slot_num[0])
         try:
-            output = self.run_command(cmd)
+            output = self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
         for entry in output:
@@ -615,9 +724,9 @@ class NetworkVirtualization(Test):
         """
         cmd = 'chhwres -r virtualio -m %s --rsubtype vnic \
                -o s --id %s -s %s -a auto_priority_failover=1' \
-               % (self.server, self.lpar_id, self.slot_num)
+               % (self.server, self.lpar_id, self.slot_num[0])
         try:
-            self.run_command(cmd)
+            self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
         if not self.is_auto_failover_enabled():
@@ -633,12 +742,12 @@ class NetworkVirtualization(Test):
                --filter lpar_names=%s -F slot_num,backing_devices' \
                % (self.server, self.lpar)
         try:
-            output = self.run_command(cmd)
+            output = self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
         for backing_dev in output:
-            if backing_dev.startswith('%s,' % self.slot_num):
-                backing_dev = backing_dev.strip('%s,"' % self.slot_num)
+            if backing_dev.startswith('%s,' % self.slot_num[0]):
+                backing_dev = backing_dev.strip('%s,"' % self.slot_num[0])
                 for entry in backing_dev.split(','):
                     entry = entry.split('/')
                     if logport in entry:
@@ -652,43 +761,43 @@ class NetworkVirtualization(Test):
         """
         cmd = 'chhwres -r virtualio --rsubtype vnicbkdev -o s -m %s \
                -s %s --id %s --logport %s -a failover_priority=%s' \
-               % (self.server, self.slot_num, self.lpar_id, logport, priority)
+               % (self.server, self.slot_num[0], self.lpar_id, logport, priority)
         try:
-            self.run_command(cmd)
+            self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
         if priority != self.get_failover_priority(logport):
             return False
         return True
 
-    def configure_device(self):
+    def configure_device(self, device_ip, netmask, mac_adrs):
         """
         Configures the Network virtualized device
         """
-        device = self.find_device()
-        cmd = "ip addr add %s/%s dev %s;ip link set %s up" % (self.device_ip,
-                                                              self.netmask,
+        device = self.find_device(mac_adrs)
+        cmd = "ip addr add %s/%s dev %s;ip link set %s up" % (device_ip,
+                                                              netmask,
                                                               device,
                                                               device)
         if process.system(cmd, shell=True, ignore_status=True) != 0:
             self.fail("Failed to configure Network \
                               Virtualized device")
-        if not self.interfacewait():
+        if not self.interfacewait(mac_adrs):
             self.fail("Unable to bring up the link on the Network \
                        virtualized device")
         self.log.info("Successfully configured the Network \
                               Virtualized device")
         return device
 
-    def find_device_id(self):
+    def find_device_id(self, mac):
         """
         Finds the device id needed to trigger failover
         """
-        device = self.find_device()
+        device = self.find_device(mac)
         device_id = process.system_output("ls -l /sys/class/net/ | \
                                            grep %s | cut -d '/' -f \
                                            5" % device,
-                                          shell=True).strip()
+                                          shell=True).decode("utf-8").strip()
         return device_id
 
     def find_virtual_slot(self, dev_id):
@@ -697,23 +806,21 @@ class NetworkVirtualization(Test):
         """
         output = process.system_output("lsslot", ignore_status=True,
                                        shell=True, sudo=True)
-        for slot in output.split('\n'):
+        for slot in output.decode("utf-8").split('\n'):
             if dev_id in slot:
                 return slot.split(' ')[0]
         return False
 
-    def ping_check(self):
+    def ping_check(self, device_ip, netmask, mac_adrs, peer_ip):
         """
         ping check
         """
-        device = self.configure_device()
+        device = self.configure_device(device_ip, netmask, mac_adrs)
         cmd = "ping -I %s %s -c 5"\
-              % (device, self.peer_ip)
-        output = process.system_output(cmd)
-        for log in output.split('\n'):
-            if ' 0% packet loss' in log.split(','):
-                return True
-        return False
+              % (device, peer_ip)
+        if process.system(cmd, shell=True, ignore_status=True) != 0:
+            return False
+        return True
 
     def trigger_failover(self, logport):
         '''
@@ -721,22 +828,22 @@ class NetworkVirtualization(Test):
         '''
         cmd = 'chhwres -r virtualio --rsubtype vnicbkdev -o act -m %s \
                -s %s --id %s \
-               --logport %s' % (self.server, self.slot_num,
+               --logport %s' % (self.server, self.slot_num[0],
                                 self.lpar_id, logport)
         try:
-            self.run_command(cmd)
+            self.run_command(self.con_hmc, cmd)
         except CommandFailed as cmdfail:
             self.log.debug(str(cmdfail))
             self.fail("Command to set %s as Active has failed" % logport)
 
-    def get_backing_device_logport(self):
+    def get_backing_device_logport(self, slot):
         '''
         Get the logical port id of the
         backing device
         '''
         for backing_dev in self.backing_dev_list():
-            if backing_dev.startswith('%s,' % self.slot_num):
-                backing_dev = backing_dev.strip('%s,"' % self.slot_num)
+            if backing_dev.startswith('%s,' % slot):
+                backing_dev = backing_dev.strip('%s,"' % slot)
                 for entry in backing_dev.split(','):
                     entry = entry.split('/')
                     if '0' in entry[2] and 'Operational' in entry[3]:
@@ -744,14 +851,14 @@ class NetworkVirtualization(Test):
                         break
         return logport
 
-    def get_active_device_logport(self):
+    def get_active_device_logport(self, slot):
         '''
         Get the logical port id of the Network
         virtualized device
         '''
         for backing_dev in self.backing_dev_list():
-            if backing_dev.startswith('%s,' % self.slot_num):
-                backing_dev = backing_dev.strip('%s,"' % self.slot_num)
+            if backing_dev.startswith('%s,' % slot):
+                backing_dev = backing_dev.strip('%s,"' % slot)
                 for entry in backing_dev.split(','):
                     entry = entry.split('/')
                     if '1' in entry[2]:
@@ -759,16 +866,44 @@ class NetworkVirtualization(Test):
                         break
         return logport
 
-    def is_backing_device_active(self):
+    def is_backing_device_active(self, slot):
         '''
         TO check the status of the backing device
         after failover
         '''
         for backing_dev in self.backing_dev_list():
-            if backing_dev.startswith('%s,' % self.slot_num):
+            if backing_dev.startswith('%s,' % slot):
                 val = int(backing_dev.split(',')[1:][1].split('/')[2])
         if val:
             return True
+        return False
+
+    def interface_naming(self, mac, slot):
+        '''
+        naming to vnic interface
+        '''
+        mac_addrs = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+        file = "/etc/udev/rules.d/70-persistent-net.rules-%s" % slot
+        with open(file, "w") as interface_conf:
+            interface_conf.write("SUBSYSTEM==net \n")
+            interface_conf.write("ACTION==add \n")
+            interface_conf.write("DRIVERS==? \n")
+            interface_conf.write("ATTR{address}==%s \n" % mac_addrs)
+            interface_conf.write("ATTR{dev_id}==0x0 \n")
+            interface_conf.write("ATTR{type}==1 \n")
+            interface_conf.write("KERNEL==vnic \n")
+            interface_conf.write("NAME=vnic%s \n" % slot)
+
+    def wait_intrerface(self, device_name):
+        """
+        Wait till interface come up
+        """
+        for _ in range(0, 120, 10):
+            for interface in netifaces.interfaces():
+                if device_name == interface:
+                    self.log.info("Network virtualized device %s is up", device_name)
+                    return True
+                time.sleep(2)
         return False
 
     def tearDown(self):

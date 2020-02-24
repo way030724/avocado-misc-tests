@@ -28,6 +28,8 @@ from avocado.utils import archive
 from avocado.utils import build
 from avocado.utils.software_manager import SoftwareManager
 from avocado.utils import configure_network
+from avocado.utils.configure_network import PeerInfo
+from avocado.utils import wait
 
 
 class TcpdumpTest(Test):
@@ -41,6 +43,7 @@ class TcpdumpTest(Test):
         """
         self.iface = self.params.get("interface", default="")
         self.count = self.params.get("count", default="500")
+        self.nping_count = self.params.get("nping_count", default="")
         self.peer_ip = self.params.get("peer_ip", default="")
         self.drop = self.params.get("drop_accepted", default="10")
         self.host_ip = self.params.get("host_ip", default="")
@@ -54,11 +57,25 @@ class TcpdumpTest(Test):
         self.ipaddr = self.params.get("host_ip", default="")
         self.netmask = self.params.get("netmask", default="")
         configure_network.set_ip(self.ipaddr, self.netmask, self.iface)
+        if not wait.wait_for(configure_network.is_interface_link_up,
+                             timeout=120, args=[self.iface]):
+            self.cancel("Link up of interface is taking longer than 120 seconds")
+        self.peer_user = self.params.get("peer_user", default="root")
+        self.peer_password = self.params.get("peer_password", '*',
+                                             default="None")
+        self.mtu = self.params.get("mtu", default=1500)
+        self.peerinfo = PeerInfo(self.peer_ip, peer_user=self.peer_user,
+                                 peer_password=self.peer_password)
+        self.peer_interface = self.peerinfo.get_peer_interface(self.peer_ip)
+        if not self.peerinfo.set_mtu_peer(self.peer_interface, self.mtu):
+            self.cancel("Failed to set mtu in peer")
+        if not configure_network.set_mtu_host(self.iface, self.mtu):
+            self.cancel("Failed to set mtu in host")
 
         # Install needed packages
         smm = SoftwareManager()
         detected_distro = distro.detect()
-        pkgs = ['tcpdump', 'flex', 'bison', 'gcc-c++']
+        pkgs = ['tcpdump', 'flex', 'bison', 'gcc', 'gcc-c++', 'nmap']
         for pkg in pkgs:
             if not smm.check_installed(pkg) and not smm.install(pkg):
                 self.cancel("%s package Can not install" % pkg)
@@ -72,7 +89,7 @@ class TcpdumpTest(Test):
             self.n_map = os.path.join(self.nmap, self.version)
             archive.extract(tarball, self.nmap)
             os.chdir(self.n_map)
-            process.system('./configure', shell=True)
+            process.system('./configure ppc64le', shell=True)
             build.make(self.n_map)
             process.system('./nping/nping -h', shell=True)
 
@@ -99,7 +116,7 @@ class TcpdumpTest(Test):
         for line in process.run(cmd, shell=True,
                                 ignore_status=True).stderr.decode("utf-8") \
                                                    .splitlines():
-            if "packets dropped by interface" in line:
+            if "packets dropped by kernel" in line:
                 self.log.info(line)
                 if int(line[0]) >= (int(self.drop) * int(self.count) / 100):
                     self.fail("%s, more than %s percent" % (line, self.drop))
@@ -109,13 +126,23 @@ class TcpdumpTest(Test):
         """
         perform nping
         """
-        cmd = "./nping/nping --%s %s -c %s" % (param, self.peer_ip, self.count)
-        return process.SubProcess(cmd, verbose=False, shell=True)
+        detected_distro = distro.detect()
+        if detected_distro.name == "SuSE":
+            cmd = "./nping/nping --%s %s -c %s" % (param,
+                                                   self.peer_ip, self.nping_count)
+            return process.SubProcess(cmd, verbose=False, shell=True)
+        else:
+            cmd = "nping --%s %s -c %s" % (param, self.peer_ip, self.nping_count)
+            return process.SubProcess(cmd, verbose=False, shell=True)
 
     def tearDown(self):
         '''
         unset ip for host interface
         '''
+        if not configure_network.set_mtu_host(self.iface, '1500'):
+            self.cancel("Failed to set mtu in host")
+        if not self.peerinfo.set_mtu_peer(self.peer_interface, '1500'):
+            self.cancel("Failed to set mtu in peer")
         configure_network.unset_ip(self.iface)
 
 

@@ -68,9 +68,9 @@ class DlparPci(Test):
             self.cancel("HMC IP not got")
         self.hmc_user = self.params.get("hmc_username", default='hscroot')
         self.hmc_pwd = self.params.get("hmc_pwd", '*', default='********')
-        self.lpar_1 = self.get_mcp_component("NodeNameList")
+        self.lpar_1 = self.get_partition_name("Partition Name")
         if not self.lpar_1:
-            self.cancel("LPAR Name not got")
+            self.cancel("LPAR Name not got from lparstat command")
         self.login(self.hmc_ip, self.hmc_user, self.hmc_pwd)
         cmd = 'lssyscfg -r sys  -F name'
         output = self.run_command(cmd)
@@ -88,6 +88,11 @@ class DlparPci(Test):
         if not self.server:
             self.cancel("Managed System not got")
         self.lpar_2 = self.params.get("lpar_2", '*', default=None)
+        if self.lpar_2 is not None:
+            cmd = 'lshwres -r io -m %s --rsubtype slot --filter lpar_names=%s ' \
+                   '-F lpar_id' % (self.server, self.lpar_2)
+            output = self.run_command(cmd)
+            self.lpar2_id = output[0]
         self.pci_device = self.params.get("pci_device", '*', default=None)
         self.loc_code = pci.get_slot_from_sysfs(self.pci_device)
         self.num_of_dlpar = int(self.params.get("num_of_dlpar", default='1'))
@@ -115,9 +120,24 @@ class DlparPci(Test):
         '''
         for line in process.system_output('lsrsrc IBM.MCP %s' % component,
                                           ignore_status=True, shell=True,
-                                          sudo=True).decode("utf-8").splitlines():
+                                          sudo=True).decode("utf-8") \
+                                                    .splitlines():
             if component in line:
                 return line.split()[-1].strip('{}\"')
+        return ''
+
+    @staticmethod
+    def get_partition_name(component):
+        '''
+        get partition name from lparstat -i
+        '''
+
+        for line in process.system_output('lparstat -i',
+                                          ignore_status=True, shell=True,
+                                          sudo=True).decode("utf-8") \
+                                                    .splitlines():
+            if component in line:
+                return line.split(':')[-1].strip()
         return ''
 
     def login(self, ip_addr, username, password):
@@ -276,9 +296,8 @@ class DlparPci(Test):
 
         self.changehwres(self.server, 'm', self.lpar_id, self.lpar_2,
                          self.drc_index, 'move')
-
         output = self.listhwres(self.server, self.lpar_1, self.drc_index)
-        if self.drc_index in output[0]:
+        if self.drc_index in output:
             self.log.debug(output)
             self.fail("lshwres still lists the drc in lpar_1 after \
                       dlpar move to lpar_2")
@@ -290,7 +309,7 @@ class DlparPci(Test):
                        dlpar move")
 
         # dlpar move operation from lpar2 to lpar1
-        self.changehwres(self.server, 'm', self.lpar_id, self.lpar_1,
+        self.changehwres(self.server, 'm', self.lpar2_id, self.lpar_1,
                          self.drc_index, 'move')
 
         output = self.listhwres(self.server, self.lpar_1, self.drc_index)
@@ -300,7 +319,7 @@ class DlparPci(Test):
                        dlpar move")
 
         output = self.listhwres(self.server, self.lpar_2, self.drc_index)
-        if self.drc_index in output[0]:
+        if self.drc_index in output:
             self.log.debug(output)
             self.fail("lshwres still lists the drc in lpar_2 after \
                       dlpar move to lpar_1")

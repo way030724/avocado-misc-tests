@@ -73,6 +73,12 @@ class DiskInfo(Test):
         if self.fstype == 'xfs':
             pkg_list.append('xfsprogs')
         if self.fstype == 'btrfs':
+            ver = int(distro.detect().version)
+            rel = int(distro.detect().release)
+            if distro.detect().name == 'rhel':
+                if (ver == 7 and rel >= 4) or ver > 7:
+                    self.cancel("btrfs is not supported with \
+                                RHEL 7.4 onwards")
             if self.distro == 'Ubuntu':
                 pkg_list.append("btrfs-tools")
         for pkg in pkg_list:
@@ -232,11 +238,12 @@ class DiskInfo(Test):
         self.part_obj.unmount()
         cmd = 'lshw -c disk | grep -n "%s" | cut -d ":" -f 1' % self.disk
         middle = process.system_output(cmd, ignore_status=True,
-                                       shell=True, sudo=True)
+                                       shell=True, sudo=True).decode('utf-8')
         if middle:
             cmd = r'lshw -c disk | grep -n "\-disk" | cut -d ":" -f 1'
             total = process.system_output(cmd, ignore_status=True,
-                                          shell=True, sudo=True)
+                                          shell=True,
+                                          sudo=True).decode('utf-8')
             lst = total.splitlines() + middle.splitlines()
             lst.sort()
             index = lst.index(middle.splitlines()[0])
@@ -244,7 +251,8 @@ class DiskInfo(Test):
             high = lst[index+1]
             cmd = "lshw -c disk |sed -n '%s, %sp'" % (low, high)
             disk_details = process.system_output(cmd, ignore_status=True,
-                                                 shell=True, sudo=True)
+                                                 shell=True,
+                                                 sudo=True).decode('utf-8')
             ls_string = "logicalsectorsize=%s sectorsize=%s" % (lbs, pbs)
             if ls_string not in disk_details:
                 msg.append("Mismatch in sector sizes of lbs,pbs"
