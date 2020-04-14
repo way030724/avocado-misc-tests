@@ -31,8 +31,9 @@ from avocado.utils import archive
 from avocado.utils import process
 from avocado.utils.ssh import Session
 from avocado.utils.genio import read_file
-from avocado.utils.configure_network import PeerInfo
-from avocado.utils import configure_network
+from avocado.utils.network.interfaces import NetworkInterface
+from avocado.utils.network.hosts import LocalHost, RemoteHost
+from avocado.utils.process import SubProcess
 
 
 class Uperf(Test):
@@ -54,7 +55,14 @@ class Uperf(Test):
             self.cancel("%s interface is not available" % self.iface)
         self.ipaddr = self.params.get("host_ip", default="")
         self.netmask = self.params.get("netmask", default="")
-        configure_network.set_ip(self.ipaddr, self.netmask, self.iface)
+        local = LocalHost()
+        self.networkinterface = NetworkInterface(self.iface, local)
+        try:
+            self.networkinterface.add_ipaddr(self.ipaddr, self.netmask)
+            self.networkinterface.save(self.ipaddr, self.netmask)
+        except Exception:
+            self.networkinterface.save(self.ipaddr, self.netmask)
+        self.networkinterface.bring_up()
         self.session = Session(self.peer_ip, user=self.peer_user,
                                password=self.peer_password)
         smm = SoftwareManager()
@@ -75,12 +83,14 @@ class Uperf(Test):
         if self.peer_ip == "":
             self.cancel("%s peer machine is not available" % self.peer_ip)
         self.mtu = self.params.get("mtu", default=1500)
-        self.peerinfo = PeerInfo(self.peer_ip, peer_user=self.peer_user,
-                                 peer_password=self.peer_password)
-        self.peer_interface = self.peerinfo.get_peer_interface(self.peer_ip)
-        if not self.peerinfo.set_mtu_peer(self.peer_interface, self.mtu):
+        remotehost = RemoteHost(self.peer_ip, self.peer_user,
+                                password=self.peer_password)
+        self.peer_interface = remotehost.get_interface_by_ipaddr(self.peer_ip).name
+        self.peer_networkinterface = NetworkInterface(self.peer_interface,
+                                                      remotehost)
+        if self.peer_networkinterface.set_mtu(self.mtu) is not None:
             self.cancel("Failed to set mtu in peer")
-        if not configure_network.set_mtu_host(self.iface, self.mtu):
+        if self.networkinterface.set_mtu(self.mtu) is not None:
             self.cancel("Failed to set mtu in host")
         uperf_download = self.params.get("uperf_download", default="https:"
                                          "//github.com/uperf/uperf/"
@@ -100,9 +110,9 @@ class Uperf(Test):
         self.uperf_run = str(self.params.get("UPERF_SERVER_RUN", default=0))
         if self.uperf_run == '1':
             cmd = "/tmp/uperf-master/src/uperf -s &"
-            output = self.session.cmd(cmd)
-            if not output.exit_status == 0:
-                self.log.debug("Command %s failed %s", cmd, output)
+            cmd = self.session.get_raw_ssh_command(cmd)
+            self.obj = SubProcess(cmd)
+            self.obj.start()
         os.chdir(self.uperf_dir)
         process.system('autoreconf -fi', shell=True)
         process.system('./configure ppc64le', shell=True)
@@ -140,16 +150,17 @@ class Uperf(Test):
         """
         Killing Uperf process in peer machine
         """
+        self.obj.stop()
         cmd = "pkill uperf; rm -rf /tmp/uperf-master"
         output = self.session.cmd(cmd)
         if not output.exit_status == 0:
             self.fail("Either the ssh to peer machine machine\
                        failed or uperf process was not killed")
-        if not configure_network.set_mtu_host(self.iface, '1500'):
+        if self.networkinterface.set_mtu('1500') is not None:
             self.cancel("Failed to set mtu in host")
-        if not self.peerinfo.set_mtu_peer(self.peer_interface, '1500'):
+        if self.peer_networkinterface.set_mtu('1500') is not None:
             self.cancel("Failed to set mtu in peer")
-        configure_network.unset_ip(self.iface)
+        self.networkinterface.remove_ipaddr(self.ipaddr, self.netmask)
 
 
 if __name__ == "__main__":

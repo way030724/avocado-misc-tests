@@ -36,7 +36,8 @@ from avocado.utils import process
 from avocado.utils import linux_modules
 from avocado.utils import genio
 from avocado.utils.ssh import Session
-from avocado.utils import configure_network
+from avocado.utils.network.interfaces import NetworkInterface
+from avocado.utils.network.hosts import LocalHost, RemoteHost
 
 
 class Bonding(Test):
@@ -86,9 +87,20 @@ class Bonding(Test):
             self.cancel("peer machine should available")
         self.ipaddr = self.params.get("host_ips", default="").split(",")
         self.netmask = self.params.get("netmask", default="")
+        self.localhost = LocalHost()
         if 'setup' in str(self.name.name):
             for ipaddr, interface in zip(self.ipaddr, self.host_interfaces):
-                configure_network.set_ip(ipaddr, self.netmask, interface)
+                networkinterface = NetworkInterface(interface, self.localhost)
+                try:
+                    networkinterface.add_ipaddr(ipaddr, self.netmask)
+                    networkinterface.save(ipaddr, self.netmask)
+                except Exception:
+                    networkinterface.save(ipaddr, self.netmask)
+                networkinterface.bring_up()
+        self.miimon = self.params.get("miimon", default="100")
+        self.fail_over_mac = self.params.get("fail_over_mac",
+                                             default="2")
+        self.downdelay = self.params.get("downdelay", default="0")
         self.bond_name = self.params.get("bond_name", default="tempbond")
         self.net_path = "/sys/class/net/"
         self.bond_status = "/proc/net/bonding/%s" % self.bond_name
@@ -99,6 +111,7 @@ class Bonding(Test):
                                                 default=False)
         self.peer_wait_time = self.params.get("peer_wait_time", default=5)
         self.sleep_time = int(self.params.get("sleep_time", default=5))
+        self.mtu = self.params.get("mtu", default=1500)
         self.ib = False
         if self.host_interface[0:2] == 'ib':
             self.ib = True
@@ -107,6 +120,19 @@ class Bonding(Test):
                                password=self.password)
         self.setup_ip()
         self.err = []
+        self.remotehost = RemoteHost(self.peer_first_ipinterface, self.user,
+                                     password=self.password)
+        if 'setup' in str(self.name.name):
+            for interface in self.peer_interfaces:
+                peer_networkinterface = NetworkInterface(interface,
+                                                         self.remotehost)
+                if peer_networkinterface.set_mtu(self.mtu) is not None:
+                    self.cancel("Failed to set mtu in peer")
+            for host_interface in self.host_interfaces:
+                self.networkinterface = NetworkInterface(host_interface,
+                                                         self.localhost)
+                if self.networkinterface.set_mtu(self.mtu) is not None:
+                    self.cancel("Failed to set mtu in host")
 
     def bond_ib_conf(self, bond_name, arg1, arg2):
         '''
@@ -274,8 +300,27 @@ class Bonding(Test):
             linux_modules.load_module("bonding")
             genio.write_file(self.bonding_masters_file, "+%s" % self.bond_name)
             genio.write_file("%s/bonding/mode" % self.bond_dir, arg2)
-            genio.write_file("%s/bonding/miimon" % self.bond_dir, "100")
-            genio.write_file("%s/bonding/fail_over_mac" % self.bond_dir, "2")
+            genio.write_file("%s/bonding/miimon" % self.bond_dir,
+                             self.miimon)
+            genio.write_file("%s/bonding/fail_over_mac" % self.bond_dir,
+                             self.fail_over_mac)
+            genio.write_file("%s/bonding/downdelay" % self.bond_dir,
+                             self.downdelay)
+            dict = {'0': ['packets_per_slave', 'resend_igmp'],
+                    '1': ['num_unsol_na', 'primary', 'primary_reselect',
+                          'resend_igmp'],
+                    '2': ['xmit_hash_policy'],
+                    '4': ['lacp_rate', 'xmit_hash_policy'],
+                    '5': ['tlb_dynamic_lb', 'primary', 'primary_reselect',
+                          'resend_igmp', 'xmit_hash_policy', 'lp_interval'],
+                    '6': ['primary', 'primary_reselect', 'resend_igmp',
+                          'lp_interval']}
+            if self.mode in dict.keys():
+                for param in dict[self.mode]:
+                    param_value = self.params.get(param, default='')
+                    if param_value:
+                        genio.write_file("%s/bonding/%s"
+                                         % (self.bond_dir, param), param_value)
             for val in self.host_interfaces:
                 if self.ib:
                     self.bond_ib_conf(self.bond_name, val, "ATTACH")
@@ -397,8 +442,15 @@ class Bonding(Test):
                     self.log.warn("unable to bring to original state in peer")
                 time.sleep(self.sleep_time)
         self.error_check()
-        for interface in self.host_interfaces:
-            configure_network.unset_ip(interface)
+        for host_interface in self.host_interfaces:
+            networkinterface = NetworkInterface(host_interface, self.localhost)
+            if networkinterface.set_mtu("1500") is not None:
+                self.cancel("Failed to set mtu in host")
+        for interface in self.peer_interfaces:
+            peer_networkinterface = NetworkInterface(interface,
+                                                     self.remotehost)
+            if peer_networkinterface.set_mtu("1500") is not None:
+                self.cancel("Failed to set mtu in peer")
 
     def error_check(self):
         if self.err:
